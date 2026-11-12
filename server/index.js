@@ -41,6 +41,7 @@ const io = new Server(server, {
 });
 
 const userSocketMap = {};
+const roomCodeMap = new Map();
 const getAllConnectedClients = (roomId) => {
   return Array.from(io.sockets.adapter.rooms.get(roomId) || []).map(
     (socketId) => {
@@ -54,9 +55,25 @@ const getAllConnectedClients = (roomId) => {
 
 io.on("connection", (socket) => {
   // console.log('Socket connected', socket.id);
-  socket.on(ACTIONS.JOIN, ({ roomId, username }) => {
+  socket.on(ACTIONS.JOIN, ({ roomId, username, initialCode }) => {
+    if (!roomId || !username) {
+      return;
+    }
+    const normalizedUsername = username.trim().toLowerCase();
+    const duplicateUser = getAllConnectedClients(roomId).some(
+      (client) => client.username?.trim().toLowerCase() === normalizedUsername
+    );
+    if (duplicateUser) {
+      socket.emit(ACTIONS.JOIN_ERROR, {
+        error: "This username is already active in the room. Choose another username.",
+      });
+      return;
+    }
     userSocketMap[socket.id] = username;
     socket.join(roomId);
+    if (!roomCodeMap.has(roomId) && typeof initialCode === "string") {
+      roomCodeMap.set(roomId, initialCode);
+    }
     const clients = getAllConnectedClients(roomId);
     // notify that new user join
     clients.forEach(({ socketId }) => {
@@ -66,15 +83,36 @@ io.on("connection", (socket) => {
         socketId: socket.id,
       });
     });
+
+    const savedCode = roomCodeMap.get(roomId);
+    if (savedCode !== undefined) {
+      io.to(socket.id).emit(ACTIONS.CODE_CHANGE, { code: savedCode });
+    }
   });
 
   // sync the code
   socket.on(ACTIONS.CODE_CHANGE, ({ roomId, code }) => {
+    if (typeof code !== "string" || !socket.rooms.has(roomId)) {
+      return;
+    }
+    roomCodeMap.set(roomId, code);
     socket.in(roomId).emit(ACTIONS.CODE_CHANGE, { code });
+  });
+
+  socket.on(ACTIONS.CURSOR_CHANGE, ({ roomId, cursor }) => {
+    if (!socket.rooms.has(roomId) || !cursor) {
+      return;
+    }
+    socket.in(roomId).emit(ACTIONS.CURSOR_CHANGE, {
+      socketId: socket.id,
+      cursor,
+    });
   });
   // when new user join the room all the code which are there are also shows on that persons editor
   socket.on(ACTIONS.SYNC_CODE, ({ socketId, code }) => {
-    io.to(socketId).emit(ACTIONS.CODE_CHANGE, { code });
+    if (typeof code === "string") {
+      io.to(socketId).emit(ACTIONS.CODE_CHANGE, { code });
+    }
   });
 
   // leave room
@@ -94,7 +132,7 @@ io.on("connection", (socket) => {
 });
 
 app.post("/compile", async (req, res) => {
-  const { code, language } = req.body;
+  const { code, language, stdin = "" } = req.body;
   const languageSettings = languageConfig[language];
 
   if (!languageSettings) {
@@ -113,6 +151,7 @@ app.post("/compile", async (req, res) => {
       script: code,
       language: language,
       versionIndex: languageSettings.versionIndex,
+      stdin,
       clientId: process.env.JDOODLE_CLIENT_ID,
       clientSecret: process.env.JDOODLE_CLIENT_SECRET,
     });
